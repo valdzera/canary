@@ -308,6 +308,8 @@ void CanaryServer::initializeDatabase() {
 	}
 	logger.debug("MySQL Version: {}", Database::getClientVersion());
 
+	g_database().createDatabaseBackup();
+
 	logger.debug("Running database manager...");
 	if (!DatabaseManager::isDatabaseSetup()) {
 		throw FailedToInitializeCanary(fmt::format(
