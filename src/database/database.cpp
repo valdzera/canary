@@ -139,10 +139,8 @@ void Database::createDatabaseBackup() const {
 		int numFields = mysql_num_fields(tableData);
 		MYSQL_FIELD* fields = mysql_fetch_fields(tableData);
 		MYSQL_ROW rowData;
-		unsigned long* lengths;
-
 		while ((rowData = mysql_fetch_row(tableData))) {
-			lengths = mysql_fetch_lengths(tableData);
+			auto lengths = mysql_fetch_lengths(tableData);
 			backupFile << "INSERT INTO " << tableName << " VALUES(";
 
 			for (int i = 0; i < numFields; ++i) {
