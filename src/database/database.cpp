@@ -61,6 +61,88 @@ bool Database::connect(const std::string* host, const std::string* user, const s
 	return true;
 }
 
+namespace {
+	std::string createBackupFileName(const std::string &backupDir, const std::string &formattedTime) {
+		std::filesystem::create_directories(backupDir);
+		return fmt::format("{}/backup_{}.sql", backupDir, formattedTime);
+	}
+
+	MYSQL_RES* getTableList(MYSQL* handle) {
+		if (mysql_query(handle, "SHOW TABLES") != 0) {
+			g_logger().error("Failed to retrieve table list: {}", mysql_error(handle));
+			return nullptr;
+		}
+		return mysql_store_result(handle);
+	}
+
+	void writeCreateTableStatement(MYSQL* handle, const std::string &tableName, std::ofstream &backupFile) {
+		std::string createTableQuery = fmt::format("SHOW CREATE TABLE `{}`", tableName);
+		if (mysql_query(handle, createTableQuery.c_str()) == 0) {
+			MYSQL_RES* createTableResult = mysql_store_result(handle);
+			if (createTableResult) {
+				MYSQL_ROW createRow = mysql_fetch_row(createTableResult);
+				if (createRow && createRow[1]) {
+					backupFile << createRow[1] << ";\n\n";
+				}
+				mysql_free_result(createTableResult);
+			}
+		} else {
+			g_logger().error("Failed to retrieve create statement for table {}: {}", tableName, mysql_error(handle));
+		}
+	}
+
+	void writeValue(std::ofstream &backupFile, const char* value, const MYSQL_FIELD &field, unsigned long length) {
+		if (!value) {
+			backupFile << "NULL";
+			return;
+		}
+
+		if (IS_BLOB(field.type)) {
+			backupFile << g_database().escapeBlob(value, length);
+		} else if (IS_NUM(field.type)) {
+			backupFile << value;
+		} else {
+			backupFile << g_database().escapeString(std::string(value, length));
+		}
+	}
+
+	void writeTableData(MYSQL* handle, const std::string &tableName, std::ofstream &backupFile) {
+		std::string selectQuery = fmt::format("SELECT * FROM `{}`", tableName);
+		if (mysql_query(handle, selectQuery.c_str()) != 0) {
+			g_logger().error("Failed to retrieve data from table {}: {}", tableName, mysql_error(handle));
+			return;
+		}
+
+		MYSQL_RES* tableData = mysql_store_result(handle);
+		if (!tableData) {
+			g_logger().error("Failed to store data result for table {}: {}", tableName, mysql_error(handle));
+			return;
+		}
+
+		int numFields = mysql_num_fields(tableData);
+		MYSQL_FIELD* fields = mysql_fetch_fields(tableData);
+		MYSQL_ROW rowData;
+
+		while ((rowData = mysql_fetch_row(tableData))) {
+			auto lengths = mysql_fetch_lengths(tableData);
+			backupFile << "INSERT INTO " << tableName << " VALUES(";
+
+			for (int i = 0; i < numFields; ++i) {
+				if (i > 0) {
+					backupFile << ", ";
+				}
+
+				writeValue(backupFile, rowData[i], fields[i], lengths[i]);
+			}
+
+			backupFile << ");\n";
+		}
+
+		backupFile << "\n";
+		mysql_free_result(tableData);
+	}
+}
+
 void Database::createDatabaseBackup() const {
 	if (!g_configManager().getBoolean(MYSQL_DB_BACKUP)) {
 		return;
@@ -74,12 +156,11 @@ void Database::createDatabaseBackup() const {
 		return;
 	}
 
-	// Create backup directory and define backup file name
+	// Criar arquivo de backup
 	std::string backupDir = "database_backup/";
-	std::filesystem::create_directories(backupDir);
-	std::string backupFileName = fmt::format("{}/backup_{}.sql", backupDir, formattedTime);
-
+	std::string backupFileName = createBackupFileName(backupDir, formattedTime);
 	std::ofstream backupFile(backupFileName, std::ios::binary);
+
 	if (!backupFile.is_open()) {
 		g_logger().error("Failed to open backup file: {}", backupFileName);
 		return;
@@ -90,81 +171,20 @@ void Database::createDatabaseBackup() const {
 		return;
 	}
 
-	// Retrieve the list of tables
-	if (mysql_query(handle, "SHOW TABLES") != 0) {
-		g_logger().error("Failed to retrieve table list: {}", mysql_error(handle));
-		return;
-	}
-
-	MYSQL_RES* tablesResult = mysql_store_result(handle);
+	// Obter a lista de tabelas
+	MYSQL_RES* tablesResult = getTableList(handle);
 	if (!tablesResult) {
-		g_logger().error("Failed to store table list result: {}", mysql_error(handle));
 		return;
 	}
 
 	g_logger().info("Creating database backup...");
 	MYSQL_ROW tableRow;
+
+	// Iterar sobre as tabelas e gravar suas informações no arquivo de backup
 	while ((tableRow = mysql_fetch_row(tablesResult))) {
 		std::string tableName = tableRow[0];
-
-		// Retrieve CREATE TABLE statement for each table
-		std::string createTableQuery = fmt::format("SHOW CREATE TABLE `{}`", tableName);
-		if (mysql_query(handle, createTableQuery.c_str()) == 0) {
-			MYSQL_RES* createTableResult = mysql_store_result(handle);
-			if (createTableResult) {
-				MYSQL_ROW createRow = mysql_fetch_row(createTableResult);
-				if (createRow && createRow[1]) {
-					backupFile << createRow[1] << ";\n\n";
-				}
-				mysql_free_result(createTableResult);
-			}
-		} else {
-			g_logger().error("Failed to retrieve create statement for table {}: {}", tableName, mysql_error(handle));
-			continue;
-		}
-
-		// Retrieve table data
-		std::string selectQuery = fmt::format("SELECT * FROM `{}`", tableName);
-		if (mysql_query(handle, selectQuery.c_str()) != 0) {
-			g_logger().error("Failed to retrieve data from table {}: {}", tableName, mysql_error(handle));
-			continue;
-		}
-
-		MYSQL_RES* tableData = mysql_store_result(handle);
-		if (!tableData) {
-			g_logger().error("Failed to store data result for table {}: {}", tableName, mysql_error(handle));
-			continue;
-		}
-
-		int numFields = mysql_num_fields(tableData);
-		MYSQL_FIELD* fields = mysql_fetch_fields(tableData);
-		MYSQL_ROW rowData;
-		while ((rowData = mysql_fetch_row(tableData))) {
-			auto lengths = mysql_fetch_lengths(tableData);
-			backupFile << "INSERT INTO " << tableName << " VALUES(";
-
-			for (int i = 0; i < numFields; ++i) {
-				if (i > 0) {
-					backupFile << ", ";
-				}
-
-				if (rowData[i]) {
-					if (IS_BLOB(fields[i].type)) {
-						backupFile << escapeBlob(rowData[i], lengths[i]);
-					} else if (IS_NUM(fields[i].type)) {
-						backupFile << rowData[i];
-					} else {
-						backupFile << escapeString(std::string(rowData[i], lengths[i]));
-					}
-				} else {
-					backupFile << "NULL";
-				}
-			}
-			backupFile << ");\n";
-		}
-
-		backupFile << "\n";
-		mysql_free_result(tableData);
+		writeCreateTableStatement(handle, tableName, backupFile);
+		writeTableData(handle, tableName, backupFile);
 	}
 
 	mysql_free_result(tablesResult);
