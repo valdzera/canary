@@ -12,6 +12,7 @@
 #include "config/configmanager.hpp"
 #include "lib/di/container.hpp"
 #include "lib/metrics/metrics.hpp"
+#include "utils/tools.hpp"
 
 Database::~Database() {
 	if (handle != nullptr) {
