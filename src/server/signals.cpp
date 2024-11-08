@@ -20,7 +20,7 @@
 #include "lua/global/globalevent.hpp"
 #include "lua/scripts/lua_environment.hpp"
 
-Signals::Signals(asio::io_service &service) :
+Signals::Signals(asio::io_context &service) :
 	set(service) {
 	set.add(SIGINT);
 	set.add(SIGTERM);
